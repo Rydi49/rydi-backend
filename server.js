@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 require('dotenv').config();
 
 const connectDB = require('./config/db');
@@ -898,6 +899,74 @@ app.put('/api/admin/listings/:id/status', protect, resolveUser, adminOnly, async
   }
 });
 
+// ============ STRIPE PAYMENTS ============
+
+app.post('/api/payments/create-intent', protect, resolveUser, async (req, res) => {
+  try {
+    // SECURITY: Frontend sends ONLY booking details, NOT amount
+    // Backend calculates price server-side — frontend can never manipulate pricing
+    const { bikeId, startDate, endDate, protectionTier = 'basic', currency = 'cad' } = req.body;
+
+    if (!bikeId || !startDate || !endDate) {
+      return res.status(400).json({ success: false, message: 'bikeId, startDate, and endDate are required' });
+    }
+    if (!process.env.STRIPE_SECRET_KEY) {
+      return res.status(500).json({ success: false, message: 'Stripe not configured' });
+    }
+
+    const bike = await Bike.findById(bikeId);
+    if (!bike) return res.status(404).json({ success: false, message: 'Bike not found' });
+
+    // Server-side price calculation — frontend cannot control this
+    const days = Math.max(1, Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)));
+    const basePrice = bike.dailyRate * days;
+
+    const tierConfig = {
+      basic: { name: 'Basic Protection', dailyPrice: 0, deposit: 2500 },
+      standard: { name: 'Standard Protection', dailyPrice: 30, deposit: 1500 },
+      premium: { name: 'Premium Protection', dailyPrice: 55, deposit: 750 },
+    };
+    const tier = tierConfig[protectionTier] || tierConfig.basic;
+    const protCost = tier.dailyPrice * days;
+    const serviceFee = Math.round(basePrice * 0.10);
+    const subtotal = basePrice + protCost + serviceFee;
+    const tax = Math.round(subtotal * 0.12);
+    const total = subtotal + tax;
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Math.round(total * 100), // Convert dollars to cents
+      currency: currency.toLowerCase(),
+      automatic_payment_methods: { enabled: true },
+      metadata: {
+        bikeId: bikeId,
+        bikeName: bike.make + ' ' + bike.model,
+        renterId: req.userDoc._id.toString(),
+        renterEmail: req.userDoc.email,
+        platform: 'rydi.ca'
+      }
+    });
+
+    res.json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      amount: total,
+      currency: currency.toUpperCase(),
+      pricing: { days, basePrice, protCost, serviceFee, tax, total, tierName: tier.name }
+    });
+  } catch (err) {
+    console.error('Stripe error:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get('/api/payments/config', (req, res) => {
+  res.json({
+    success: true,
+    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || ''
+  });
+});
+
 // ============ HEALTH ============
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString(), version: '3.1.0' });
@@ -905,10 +974,10 @@ app.get('/api/health', (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    message: 'RYDI API v3 - MongoDB Backend',
-    version: '3.1.0',
-    features: ['Auth', 'Bikes', 'Bookings', 'Reviews', 'Verifications', 'Owner Dashboard', 'Admin Panel', 'Email Notifications', 'Google Maps'],
-    endpoints: ['/api/auth', '/api/bikes', '/api/bookings', '/api/reviews', '/api/verifications', '/api/owner/stats', '/api/admin']
+    message: 'RYDI API v3.2 - MongoDB + Stripe Backend',
+    version: '3.2.0',
+    features: ['Auth', 'Bikes', 'Bookings', 'Reviews', 'Verifications', 'Owner Dashboard', 'Admin Panel', 'Email Notifications', 'Google Maps', 'Stripe Payments'],
+    endpoints: ['/api/auth', '/api/bikes', '/api/bookings', '/api/reviews', '/api/verifications', '/api/owner/stats', '/api/admin', '/api/payments']
   });
 });
 
