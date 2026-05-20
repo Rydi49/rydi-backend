@@ -16,6 +16,7 @@ const Review = require('./models/Review');
 const Verification = require('./models/Verification');
 const Settings = require('./models/Settings');
 
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -28,7 +29,7 @@ if (!JWT_SECRET) {
 
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'builtby.sc@outlook.com';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'info@rydi.ca';
 
 // Rate limiters
 const authLimiter = rateLimit({
@@ -73,6 +74,55 @@ app.use(cors({
   credentials: true
 }));
 app.use(apiLimiter);
+
+// Stripe webhook MUST receive raw body (not parsed JSON) for signature verification
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  
+  if (!endpointSecret) {
+    return res.status(500).send('Webhook secret not configured');
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object;
+    const bookingId = paymentIntent.metadata?.bookingId;
+    if (bookingId) {
+      try {
+        const booking = await Booking.findById(bookingId);
+        if (booking && booking.status === 'pending_payment') {
+          booking.status = 'pending';
+          booking.paymentIntentId = paymentIntent.id;
+          booking.paidAt = new Date().toISOString();
+          await booking.save();
+          console.log('Webhook: Booking', bookingId, 'confirmed after payment');
+        }
+      } catch (err) {
+        console.error('Webhook error:', err.message);
+      }
+    }
+  } else if (event.type === 'payment_intent.payment_failed') {
+    const paymentIntent = event.data.object;
+    const bookingId = paymentIntent.metadata?.bookingId;
+    if (bookingId) {
+      try {
+        await Booking.findByIdAndUpdate(bookingId, { status: 'cancelled', cancellationReason: 'Payment failed' });
+      } catch (err) {
+        console.error('Webhook cancel error:', err.message);
+      }
+    }
+  }
+
+  res.json({ received: true });
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 // Input sanitization — trim all strings, strip < >
@@ -250,11 +300,12 @@ async function getUserVerificationStatus(userId) {
 
 // ============ SEED DATA ============
 async function seedData() {
-  const userCount = await User.countDocuments();
-  if (userCount === 0) {
-    const adminPassword = await bcrypt.hash('admin123', 10);
-    const admin = await User.create({
-      email: 'builtby.sc@outlook.com',
+  // Always ensure admin exists
+  let admin = await User.findOne({ email: 'info@rydi.ca' });
+  if (!admin) {
+    const adminPassword = await bcrypt.hash('admin123', 12);
+    admin = await User.create({
+      email: 'info@rydi.ca',
       password: adminPassword,
       firstName: 'Shayne',
       lastName: 'Chassie',
@@ -264,9 +315,13 @@ async function seedData() {
       responseTime: '< 1 hour',
       verificationStatus: 'verified'
     });
+    console.log('Admin user created: info@rydi.ca');
+  }
 
-    const ownerPassword = await bcrypt.hash('owner123', 10);
-    const owner = await User.create({
+  let owner = await User.findOne({ email: 'jennifer@rydi.ca' });
+  if (!owner) {
+    const ownerPassword = await bcrypt.hash('owner123', 12);
+    owner = await User.create({
       email: 'jennifer@rydi.ca',
       password: ownerPassword,
       firstName: 'Jennifer',
@@ -277,9 +332,12 @@ async function seedData() {
       responseTime: '< 2 hours',
       verificationStatus: 'verified'
     });
+  }
 
-    const riderPassword = await bcrypt.hash('rider123', 10);
-    const rider = await User.create({
+  let rider = await User.findOne({ email: 'rider@example.com' });
+  if (!rider) {
+    const riderPassword = await bcrypt.hash('rider123', 12);
+    rider = await User.create({
       email: 'rider@example.com',
       password: riderPassword,
       firstName: 'James',
@@ -290,7 +348,11 @@ async function seedData() {
       responseTime: '< 1 hour',
       verificationStatus: 'verified'
     });
+  }
 
+  // Seed bikes only if none exist
+  const bikeCount = await Bike.countDocuments();
+  if (bikeCount === 0) {
     const bikes = await Bike.create([
       {
         make: 'Kawasaki', model: 'KLE 500', year: 2024, dailyRate: 85,
@@ -387,11 +449,37 @@ async function seedData() {
       completedAt: '2026-03-14T18:00:00Z'
     });
 
-    console.log('Seed complete!');
-    console.log('Admin: builtby.sc@outlook.com / admin123');
-    console.log('Owner: jennifer@rydi.ca / owner123');
-    console.log('Rider: rider@example.com / rider123');
+    console.log('Bikes seeded: 6');
   }
+
+  // Seed settings if none exist
+  const settingsCount = await Settings.countDocuments();
+  if (settingsCount === 0) {
+    await Settings.create({
+      platformFeePercent: 12,
+      taxRatePercent: 12,
+      minRentalHours: 24,
+      maxAdvanceBookingDays: 90,
+      autoApproveListings: false,
+      requireVerificationForBooking: true,
+      protectionTiers: {
+        basic: { name: 'Basic Protection', dailyCost: 15, coverageLimit: 2000, deductible: 500, deposit: 1000 },
+        standard: { name: 'Standard Protection', dailyCost: 25, coverageLimit: 5000, deductible: 250, deposit: 1500 },
+        premium: { name: 'Premium Protection', dailyCost: 40, coverageLimit: 10000, deductible: 0, deposit: 2500 }
+      },
+      cancellationPolicy: {
+        fullRefundHours: 48,
+        partialRefundPercent: 50,
+        partialRefundHours: 24
+      }
+    });
+    console.log('Default settings seeded');
+  }
+
+  console.log('Seed complete!');
+  console.log('Admin: info@rydi.ca / admin123');
+  console.log('Owner: jennifer@rydi.ca / owner123');
+  console.log('Rider: rider@example.com / rider123');
 }
 
 // ============ AUTH ============
@@ -961,6 +1049,20 @@ app.put('/api/bookings/:id/payment-success', protect, resolveUser, async (req, r
     if (booking.renter !== req.userDoc._id.toString()) {
       return res.status(403).json({ success: false, message: 'Not your booking' });
     }
+
+    // SECURITY: Verify payment with Stripe before confirming
+    if (booking.paymentIntentId) {
+      try {
+        const intent = await stripe.paymentIntents.retrieve(booking.paymentIntentId);
+        if (intent.status !== 'succeeded') {
+          return res.status(402).json({ success: false, message: 'Payment not yet confirmed by Stripe' });
+        }
+      } catch (stripeErr) {
+        console.error('Stripe verification error:', stripeErr.message);
+        return res.status(500).json({ success: false, message: 'Could not verify payment status' });
+      }
+    }
+
     booking.status = 'pending';
     await booking.save();
     res.json({ success: true, message: 'Payment confirmed. Booking request sent to owner.', data: booking });

@@ -20,10 +20,10 @@ const bcrypt = require('bcryptjs');
 const connectDB = require('../config/db');
 const User = require('../models/User');
 
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@rydi.ca';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'info@rydi.ca';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'RydiAdmin2026!';
-const ADMIN_FIRST = process.env.ADMIN_FIRST || 'RYDI';
-const ADMIN_LAST = process.env.ADMIN_LAST || 'Admin';
+const ADMIN_FIRST = process.env.ADMIN_FIRST || 'Shayne';
+const ADMIN_LAST = process.env.ADMIN_LAST || 'Chassie';
 
 async function seedAdmin() {
   try {
