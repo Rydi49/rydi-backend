@@ -54,6 +54,7 @@ app.use(helmet());
 // CORS: allow multiple origins for production + local testing simultaneously
 const ALLOWED_ORIGINS = [
   'https://rydi.ca',
+  'https://rydi.netlify.app',
   'https://www.rydi.ca',
   'http://localhost:5173',
   'http://localhost:5174',
