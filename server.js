@@ -51,27 +51,9 @@ const apiLimiter = rateLimit({
 
 // Middleware
 app.use(helmet());
-// CORS: allow multiple origins for production + local testing simultaneously
-const ALLOWED_ORIGINS = [
-  'https://rydi.ca',
-  'https://rydi.netlify.app',
-  'https://www.rydi.ca',
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:3000',
-  'http://localhost:4173',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:5174',
-  'http://127.0.0.1:3000',
-];
-
+// CORS: allow all origins for testing
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
-  },
+  origin: true,
   credentials: true
 }));
 app.use(apiLimiter);
